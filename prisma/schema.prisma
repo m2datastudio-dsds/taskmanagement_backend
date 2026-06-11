@@ -1,0 +1,227 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoleName {
+  super_admin
+  admin
+  employee
+  intern
+}
+
+enum StatusName {
+  created
+  assigned
+  in_progress
+  completed
+  closed
+  reassign
+  revoked
+  on_hold
+}
+
+model Role {
+  id          Int           @id @default(autoincrement())
+  name        RoleName      @unique
+  createdat   DateTime      @default(now())
+  userrolemap UserRoleMap[] @relation("Role_UserRoleMap")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  password  String
+  isdeleted Boolean  @default(false)
+  createdat DateTime @default(now())
+  updatedat DateTime @updatedAt
+
+  /**
+   * relations
+   */
+  createdTasks         Task[]                @relation("CreatedTasks")
+  assignedTasks        Task[]                @relation("AssignedTasks")
+  comments             Comment[]             @relation("User_Comments")
+  userrolemap          UserRoleMap[]         @relation("UserRoleMap_User")
+  assignedByRole       UserRoleMap[]         @relation("UserRoleMap_AssignedBy")
+  taskusermap          TaskUserMap[]         @relation("User_TaskUserMap")
+  taskcommentmap       TaskCommentMap[]      @relation("User_TaskCommentMap")
+  organizationsCreated Organization[]        @relation("Organization_CreatedBy")
+  organizationUserMap  OrganizationUserMap[] @relation("User_OrganizationUserMap")
+  assignedOrgMappings  OrganizationUserMap[] @relation("OrganizationUserMap_AssignedBy")
+}
+
+model Status {
+  id        Int        @id @default(autoincrement())
+  name      StatusName @unique
+  createdat DateTime   @default(now())
+
+  tasks       Task[]
+  taskUserMap TaskUserMap[]
+}
+
+model Task {
+  id             Int       @id @default(autoincrement())
+  title          String?
+  description    String?
+  userid         Int?
+  periodSchedule String?
+  orgid          Int?
+  statusId       Int
+  isactive       Boolean   @default(true)
+  createdat      DateTime  @default(now())
+  createdby      Int
+  updatedby      Int?
+  updatedat      DateTime?
+  duedate        DateTime?
+  priority       String?   @default("normal")
+
+  /**
+   * relations
+   */
+  status         Status           @relation(fields: [statusId], references: [id])
+  createdByUser  User?            @relation("CreatedTasks", fields: [createdby], references: [id])
+  assignedUser   User?            @relation("AssignedTasks", fields: [userid], references: [id])
+  taskusermap    TaskUserMap[]    @relation("Task_TaskUserMap")
+  comments       Comment[]        @relation("Task_Comments")
+  taskcommentmap TaskCommentMap[] @relation("Task_TaskCommentMap")
+  organization   Organization?    @relation("Org_Tasks", fields: [orgid], references: [id])
+
+  @@index([userid])
+  @@index([statusId])
+  @@index([duedate])
+  @@index([orgid])
+}
+
+model TaskUserMap {
+  id          Int       @id @default(autoincrement())
+  taskid      Int
+  userid      Int?
+  statusId    Int
+  isactive    Boolean   @default(true)
+  createdat   DateTime  @default(now())
+  createdby   Int
+  updatedby   Int?
+  updatedat   DateTime?
+  removedat   DateTime?
+  pickedupat  DateTime?
+  completedat DateTime?
+
+  task   Task   @relation("Task_TaskUserMap", fields: [taskid], references: [id])
+  user   User?  @relation("User_TaskUserMap", fields: [userid], references: [id])
+  status Status @relation(fields: [statusId], references: [id])
+
+  @@index([taskid, isactive])
+  @@index([userid, isactive])
+}
+
+model Comment {
+  id             Int              @id @default(autoincrement())
+  taskid         Int
+  userid         Int
+  comments       String
+  updatedat      DateTime         @default(now())
+  isEdited       Boolean          @default(false)
+  isDeleted      Boolean          @default(false)
+  task           Task             @relation("Task_Comments", fields: [taskid], references: [id])
+  user           User             @relation("User_Comments", fields: [userid], references: [id])
+  taskcommentmap TaskCommentMap[] @relation("Comment_TaskCommentMap")
+
+  @@index([taskid, updatedat])
+  @@index([userid, updatedat])
+}
+
+model TaskCommentMap {
+  id        Int      @id @default(autoincrement())
+  taskid    Int
+  commentid Int
+  updatedat DateTime @default(now())
+  isEdited  Boolean  @default(false)
+  isDeleted Boolean  @default(false)
+  createdby Int?
+  createdat DateTime @default(now())
+  isactive  Boolean  @default(true)
+
+  task    Task    @relation("Task_TaskCommentMap", fields: [taskid], references: [id])
+  comment Comment @relation("Comment_TaskCommentMap", fields: [commentid], references: [id])
+  user    User?   @relation("User_TaskCommentMap", fields: [createdby], references: [id])
+
+  @@index([taskid, isactive])
+}
+
+model UserRoleMap {
+  id         Int       @id @default(autoincrement())
+  userid     Int
+  roleId     Int?
+  role       Role?     @relation("Role_UserRoleMap", fields: [roleId], references: [id])
+  isactive   Boolean   @default(true)
+  assignedby Int?
+  assignedat DateTime  @default(now())
+  updatedat  DateTime? @updatedAt
+  updatedby  Int?
+  removedat  DateTime?
+  user       User?     @relation("UserRoleMap_User", fields: [userid], references: [id])
+  assignedBy User?     @relation("UserRoleMap_AssignedBy", fields: [assignedby], references: [id])
+
+  @@index([userid, isactive])
+}
+
+model Organization {
+  id          Int     @id @default(autoincrement())
+  name        String
+  code        String  @unique
+  description String?
+
+  // normal details
+  email   String?
+  phone   String?
+  website String?
+
+  // basic address details (optional)
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  state        String?
+  country      String?
+  postalCode   String?
+
+  // logo (URL or file path)
+  logo                String?
+  isactive            Boolean               @default(true)
+  createdby           Int
+  createdat           DateTime              @default(now())
+  updatedby           Int?
+  updatedat           DateTime?             @updatedAt
+  removedat           DateTime?
+  createdByUser       User                  @relation("Organization_CreatedBy", fields: [createdby], references: [id])
+  organizationUserMap OrganizationUserMap[]
+  tasks               Task[]                @relation("Org_Tasks")
+
+  @@index([isactive])
+}
+
+model OrganizationUserMap {
+  id         Int       @id @default(autoincrement())
+  orgid      Int
+  userid     Int
+  isactive   Boolean   @default(true)
+  role       RoleName?
+  assignedby Int?
+  assignedat DateTime  @default(now())
+  updatedby  Int?
+  updatedat  DateTime? @updatedAt
+  removedat  DateTime?
+
+  organization Organization @relation(fields: [orgid], references: [id])
+  user         User         @relation("User_OrganizationUserMap", fields: [userid], references: [id])
+  assignedBy   User?        @relation("OrganizationUserMap_AssignedBy", fields: [assignedby], references: [id])
+
+  @@unique([orgid, userid])
+  @@index([userid, isactive])
+  @@index([orgid, isactive])
+}

@@ -5,7 +5,7 @@ import { HttpException } from "../utils/http-exception.js";
 
 
 // Controller: create task (only admin)
-// export const createTask = async (req, res, next) => {
+
 //   try {
 //     const { title, description, assignedToId, statusName, statusId, dueDate } = req.body;
 
@@ -143,6 +143,11 @@ import { HttpException } from "../utils/http-exception.js";
 
 
 
+const taskImageUrl = (req) => {
+  if (!req.file) return null;
+  return `${req.protocol}://${req.get("host")}/uploads/task_images/${req.file.filename}`;
+};
+
 export const createTask = async (req, res, next) => {
   try {
     const actorId = req.user?.userId;
@@ -195,36 +200,76 @@ export const createTask = async (req, res, next) => {
       throw new HttpException(400, "Invalid status");
     }
 
+
+    if (statusName.toLowerCase() !== "assigned") {
+      throw new HttpException(400, "Task must be assigned to an employee or intern");
+    }
     /* ------------------------------
        ASSIGNED USER RESOLVE
+       Only employee/intern users in the actor organization can be mapped.
     ------------------------------ */
     let assignedUserId = null;
 
+    const employeeInternOrgFilter = {
+      isdeleted: false,
+      organizationUserMap: {
+        some: {
+          orgid: orgId,
+          isactive: true,
+          role: { in: ["employee", "intern"] },
+        },
+      },
+    };
+
     if (assignedToId) {
-      assignedUserId = Number(assignedToId);
-      if (Number.isNaN(assignedUserId)) {
+      const parsedAssignedToId = Number(assignedToId);
+      if (!Number.isInteger(parsedAssignedToId) || parsedAssignedToId <= 0) {
         return res.status(400).json({
           success: false,
           message: "Invalid assignedToId",
         });
       }
-    } else if (assignedToName) {
+
       const user = await prisma.user.findFirst({
         where: {
-          name: assignedToName,
-          orgid: orgId,
+          id: parsedAssignedToId,
+          ...employeeInternOrgFilter,
         },
+        select: { id: true },
       });
 
       if (!user) {
         return res.status(400).json({
           success: false,
-          message: "Assigned user not found",
+          message: "Assigned user must be an active employee or intern in this organization",
+        });
+      }
+
+      assignedUserId = user.id;
+    } else if (assignedToName) {
+      const assignedName = String(assignedToName).trim();
+      const user = await prisma.user.findFirst({
+        where: {
+          ...employeeInternOrgFilter,
+          OR: [{ name: assignedName }, { email: assignedName }],
+        },
+        select: { id: true },
+      });
+
+      if (!user) {
+        return res.status(400).json({
+          success: false,
+          message: "Assigned user must be an active employee or intern in this organization",
         });
       }
 
       assignedUserId = user.id;
     }
+
+    if (!assignedUserId) {
+      throw new HttpException(400, "Please assign task to an active employee or intern");
+    }
+
 
       // 🔐 VALIDATION: schedule fields per period
     if (period === "weekly" && (dayOfWeek === undefined || dayOfWeek === null)) {
@@ -283,6 +328,9 @@ export const createTask = async (req, res, next) => {
     if (!allowedPriorities.has(normalizedPriority)) {
       throw new HttpException(400, "Invalid priority. Use low/medium/high/urgent");
     }
+    const taskOwnerUserId = assignedUserId;
+    const uploadedImageUrl = taskImageUrl(req);
+
     /* ------------------------------
        CREATE TASK
     ------------------------------ */
@@ -290,7 +338,7 @@ export const createTask = async (req, res, next) => {
       data: {
         title,
         description,
-        userid: assignedUserId,
+        userid: taskOwnerUserId,
         statusId: status.id,
         createdby: actorId,
         orgid: orgId,
@@ -298,23 +346,24 @@ export const createTask = async (req, res, next) => {
         periodSchedule,
         duedate: parsedDueDate,
         priority: normalizedPriority,
+        ...(uploadedImageUrl ? { imageUrl: uploadedImageUrl } : {}),
       },
     });
 
     /* ------------------------------
        MAP USER TO TASK
+       Assigned task -> employee/intern userid
+       Task owner -> assigned employee/intern userid
     ------------------------------ */
-    if (assignedUserId) {
-      await prisma.taskUserMap.create({
-        data: {
-          taskid: task.id,
-          userid: assignedUserId,
-          statusId: status.id,
-          createdby: actorId,
-          isactive: true,
-        },
-      });
-    }
+    await prisma.taskUserMap.create({
+      data: {
+        taskid: task.id,
+        userid: taskOwnerUserId,
+        statusId: status.id,
+        createdby: actorId,
+        isactive: true,
+      },
+    });
 
     return res.status(201).json({
       success: true,
@@ -345,17 +394,46 @@ export const createTask = async (req, res, next) => {
 export const changeTaskStatus = async (req, res, next) => {
   try {
     const { taskId, statusName, statusId } = req.body;
-    if (!taskId) throw new HttpException(400, "taskId is required");
+    const parsedTaskId = Number(taskId);
+    if (!Number.isInteger(parsedTaskId) || parsedTaskId <= 0) {
+      throw new HttpException(400, "Valid taskId is required");
+    }
 
     // 1) Find task
     const task = await prisma.task.findUnique({
-      where: { id: taskId },
+      where: { id: parsedTaskId },
       include: { assignedUser: true },
     });
     if (!task) throw new HttpException(404, "Task not found");
 
-    // 2) Actor
-    const actorId = req.user?.userId ?? task.createdby;
+    // 2) Actor. Employees/interns may update only their current active assignment.
+    const actorId = req.user?.userId;
+    if (!actorId) throw new HttpException(401, "Unauthorized");
+
+    const actorRoleMap = await prisma.userRoleMap.findFirst({
+      where: { userid: actorId, isactive: true },
+      include: { role: true },
+      orderBy: { assignedat: "desc" },
+    });
+    const actorRole = actorRoleMap?.role?.name ?? req.user?.role ?? null;
+    const isAdminLike = ["admin", "super_admin"].includes(
+      String(actorRole || "").toLowerCase()
+    );
+
+    if (!isAdminLike) {
+      const activeAssignment = await prisma.taskUserMap.findFirst({
+        where: {
+          taskid: parsedTaskId,
+          userid: actorId,
+          isactive: true,
+        },
+        select: { id: true },
+      });
+
+      if (!activeAssignment || task.userid !== actorId) {
+        throw new HttpException(403, "You are no longer assigned to this task");
+      }
+    }
 
     // 3) Resolve statusId/name
     let resolvedStatusId = statusId;
@@ -391,7 +469,7 @@ export const changeTaskStatus = async (req, res, next) => {
     const result = await prisma.$transaction(async (tx) => {
       // a) Update Task
       const updatedTask = await tx.task.update({
-        where: { id: taskId },
+        where: { id: parsedTaskId },
         data: {
           statusId: resolvedStatusId,
           updatedby: actorId,
@@ -405,21 +483,21 @@ export const changeTaskStatus = async (req, res, next) => {
 
       if (statusLower === "in_progress") {
         const r = await tx.taskUserMap.updateMany({
-          where: { taskid: taskId, isactive: true, pickedupat: null },
+          where: { taskid: parsedTaskId, isactive: true, pickedupat: null },
           data: { pickedupat: now, updatedby: actorId, updatedat: now },
         });
         setPickup = r.count;
       } else if (statusLower === "completed") {
         // ensure pickedupat exists for rows that never picked up
         const p = await tx.taskUserMap.updateMany({
-          where: { taskid: taskId, isactive: true, pickedupat: null },
+          where: { taskid: parsedTaskId, isactive: true, pickedupat: null },
           data: { pickedupat: now, updatedby: actorId, updatedat: now },
         });
         setPickup = p.count;
 
         // set completedat once
         const c = await tx.taskUserMap.updateMany({
-          where: { taskid: taskId, isactive: true, completedat: null },
+          where: { taskid: parsedTaskId, isactive: true, completedat: null },
           data: { completedat: now, updatedby: actorId, updatedat: now },
         });
         setCompleted = c.count;
@@ -427,7 +505,7 @@ export const changeTaskStatus = async (req, res, next) => {
 
       // c) ✅ ALWAYS mirror final statusId to ALL active mappings (critical fix)
       const mirror = await tx.taskUserMap.updateMany({
-        where: { taskid: taskId, isactive: true },
+        where: { taskid: parsedTaskId, isactive: true },
         data: { statusId: resolvedStatusId, updatedby: actorId, updatedat: now },
       });
 
@@ -510,36 +588,40 @@ export const adminTaskAction = async (req, res, next) => {
       });
       if (!newUser) throw new HttpException(404, "New user not found");
 
-      const inProgressStatusId = await resolveStatusIdByName("in_progress");
+      const assignedStatusId = await resolveStatusIdByName("assigned");
+      if (!assignedStatusId) throw new HttpException(500, "assigned status not found");
 
       const result = await prisma.$transaction(async (tx) => {
-        // deactivate old user record
+        // Close old active assignment records. Old assignee can no longer act on this task.
         await tx.taskUserMap.updateMany({
-          where: { taskid: taskId, userid: task.userid, isactive: true },
-          data: { isactive: false, removedat: now, updatedat: now },
-        });
-
-        // update task with new user
-        const updatedTask = await tx.task.update({
-          where: { id: taskId },
+          where: { taskid: taskId, isactive: true },
           data: {
-            userid: newUserId,
-            statusId: inProgressStatusId,
+            isactive: false,
+            removedat: now,
             updatedby: actorId,
             updatedat: now,
           },
         });
 
-        // add new mapping with pickedupat when status is in_progress
+        // Update task with the new owner. Reassigned work waits for the new owner to start it.
+        const updatedTask = await tx.task.update({
+          where: { id: taskId },
+          data: {
+            userid: newUserId,
+            statusId: assignedStatusId,
+            updatedby: actorId,
+            updatedat: now,
+          },
+        });
+
         await tx.taskUserMap.create({
           data: {
             taskid: taskId,
             userid: newUserId,
-            statusId: inProgressStatusId,
+            statusId: assignedStatusId,
             isactive: true,
             createdby: actorId,
             createdat: now,
-            pickedupat: now, // Set pickedupat when status is in_progress
           },
         });
 
@@ -1262,13 +1344,38 @@ export const assignTask = async (req, res, next) => {
         data: updateData,
       });
 
-      // ✅ create map if missing, else update
-      const existingMap = await tx.taskUserMap.findFirst({
-        where: { taskid: taskId, isactive: true },
+      // Reassignment must close the old active assignee record and create/update only the new owner record.
+      await tx.taskUserMap.updateMany({
+        where: {
+          taskid: taskId,
+          isactive: true,
+          NOT: { userid: assignedUser.id },
+        },
+        data: {
+          isactive: false,
+          removedat: now,
+          updatedby: actorId,
+          updatedat: now,
+        },
       });
 
-      let map = null;
-      if (!existingMap) {
+      let map = await tx.taskUserMap.findFirst({
+        where: { taskid: taskId, userid: assignedUser.id, isactive: true },
+      });
+
+      if (map) {
+        map = await tx.taskUserMap.update({
+          where: { id: map.id },
+          data: {
+            statusId: assignedStatus.id,
+            updatedby: actorId,
+            updatedat: now,
+            removedat: null,
+            pickedupat: null,
+            completedat: null,
+          },
+        });
+      } else {
         map = await tx.taskUserMap.create({
           data: {
             taskid: taskId,
@@ -1277,14 +1384,6 @@ export const assignTask = async (req, res, next) => {
             createdby: actorId,
             createdat: now,
             isactive: true,
-          },
-        });
-      } else {
-        map = await tx.taskUserMap.update({
-          where: { id: existingMap.id },
-          data: {
-            userid: assignedUser.id,
-            statusId: assignedStatus.id,
           },
         });
       }
@@ -1322,3 +1421,65 @@ export const assignTask = async (req, res, next) => {
     return res.status(500).json({ status: 500, message: "Internal Server Error" });
   }
 };
+export const updateTaskImage = async (req, res, next) => {
+  try {
+    const actorId = req.user?.userId;
+    const actorRole = req.user?.role;
+    const taskId = Number(req.params.taskId);
+
+    if (!actorId) throw new HttpException(401, "Unauthorized");
+    if (!Number.isInteger(taskId) || taskId <= 0) {
+      throw new HttpException(400, "Valid taskId is required");
+    }
+    if (!req.file) throw new HttpException(400, "Task image is required");
+
+    const task = await prisma.task.findUnique({
+      where: { id: taskId },
+      select: { id: true, userid: true, orgid: true, isactive: true },
+    });
+    if (!task || !task.isactive) throw new HttpException(404, "Task not found");
+
+    const roleMap = await prisma.userRoleMap.findFirst({
+      where: { userid: actorId, isactive: true },
+      include: { role: true },
+      orderBy: { assignedat: "desc" },
+    });
+    const roleName = roleMap?.role?.name ?? actorRole ?? null;
+    const isAdminLike = ["admin", "super_admin"].includes(
+      String(roleName || "").toLowerCase()
+    );
+
+    if (!isAdminLike) {
+      const activeAssignment = await prisma.taskUserMap.findFirst({
+        where: { taskid: taskId, userid: actorId, isactive: true },
+        select: { id: true },
+      });
+      if (!activeAssignment || task.userid !== actorId) {
+        throw new HttpException(403, "You are no longer assigned to this task");
+      }
+    }
+
+    const imageUrl = taskImageUrl(req);
+    const updatedTask = await prisma.task.update({
+      where: { id: taskId },
+      data: {
+        imageUrl,
+        updatedby: actorId,
+        updatedat: new Date(),
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: "Task image uploaded successfully",
+      task: updatedTask,
+    });
+  } catch (err) {
+    console.error("updateTaskImage error:", err);
+    if (err instanceof HttpException) return next(err);
+    return next(new HttpException(500, "Internal Server Error"));
+  }
+};
+
+
+

@@ -80,6 +80,7 @@ model Task {
   updatedat      DateTime?
   duedate        DateTime?
   priority       String?   @default("normal")
+  imageUrl       String?
 
   /**
    * relations

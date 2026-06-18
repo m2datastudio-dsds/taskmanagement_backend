@@ -18,8 +18,23 @@ export const register = async (req, res, next) => {
     const actorId = req.user?.userId || null;          // ✅ admin id from token
     const orgIdFromToken = req.user?.orgId || null;    // ✅ org id from token
 
+    const actorRole = req.user?.role || null;
+    const requestedRole = roleName.trim();
+
+    if (actorRole === "admin" && !["employee", "intern"].includes(requestedRole)) {
+      throw new HttpException(403, "Admin can create only employee or intern users");
+    }
+
+    if (actorRole === "super_admin" && requestedRole !== "admin") {
+      throw new HttpException(403, "Super admin can create only admin users");
+    }
+
+    if (requestedRole === "super_admin" && actorRole !== "super_admin") {
+      throw new HttpException(403, "Only super_admin can create super_admin users");
+    }
+
     // If admin is not super_admin, orgId must exist in token
-    if (req.user?.role !== "super_admin" && !orgIdFromToken) {
+    if (actorRole !== "super_admin" && !orgIdFromToken) {
       throw new HttpException(400, "Organization not selected in login");
     }
 
@@ -29,9 +44,9 @@ export const register = async (req, res, next) => {
     if (existingUser) throw new HttpException(400, "Email already registered");
 
     const roleRow = await prisma.role.findFirst({
-      where: { name: roleName }, // RoleName enum → must match exactly
+      where: { name: requestedRole }, // RoleName enum → must match exactly
     });
-    if (!roleRow) throw new HttpException(400, `Role '${roleName}' not found`);
+    if (!roleRow) throw new HttpException(400, `Role '${requestedRole}' not found`);
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
@@ -145,9 +160,59 @@ export const login = async (req, res, next) => {
       });
     }
 
-    // 4️⃣ For non-super admins → require organization name
-    if (!organizationName?.trim())
-      throw new HttpException(400, "Organization name is required");
+    // 4) For non-super admins, ask mobile app to select one mapped organization
+    if (!organizationName?.trim()) {
+      const orgMappings = await prisma.organizationUserMap.findMany({
+        where: {
+          userid: user.id,
+          isactive: true,
+          organization: { is: { isactive: true } },
+        },
+        include: {
+          organization: {
+            select: {
+              id: true,
+              name: true,
+              code: true,
+              description: true,
+              logo: true,
+            },
+          },
+        },
+        orderBy: { assignedat: "desc" },
+      });
+
+      const organizations = orgMappings
+        .filter((mapping) => mapping.organization)
+        .map((mapping) => ({
+          id: mapping.organization.id,
+          name: mapping.organization.name,
+          code: mapping.organization.code,
+          description: mapping.organization.description,
+          logo: toFullLogoUrl(mapping.organization.logo),
+          role: mapping.role,
+        }));
+
+      if (!organizations.length) {
+        throw new HttpException(403, "User is not assigned to any active organization");
+      }
+
+      return res.json({
+        success: true,
+        organizationRequired: true,
+        message: "Select organization to continue",
+        organizations,
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: roleName,
+          createdat: user.createdat,
+          isdeleted: user.isdeleted,
+        },
+      });
+    }
+
 
     const organization = await prisma.organization.findFirst({
       where: { name: organizationName, isactive: true },

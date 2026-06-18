@@ -42,11 +42,12 @@ export async function getOverview(req, res, next) {
     const isSuperAdmin = roleName === "super_admin";
     const isAdmin = roleName === "admin";
 
-    // ✅ Active organization (from OrganizationUserMap)
-    const orgId =
-      userRoleMap?.user?.organizationUserMap?.find((o) => o.isactive)?.orgid ??
-      null;
+    // Active organization comes from the selected organization in the login token.
+    const orgId = Number(req.user?.orgId || 0) || null;
 
+    if (isAdmin && !orgId) {
+      throw new HttpException(400, "Organization not selected in login");
+    }
     /* --------------------------------------------------
      * QUERY PARAMS
      * -------------------------------------------------- */
@@ -275,156 +276,144 @@ export async function getOverview(req, res, next) {
 
 export const getStatusBreakdown = async (req, res) => {
   try {
-    const { userId } = req.query;
+    const { userId, orgId } = req.query;
+    const actorRole = req.user?.role ?? null;
+    const actorOrgId = Number(req.user?.orgId || 0);
+    const requestedOrgId = orgId ? Number(orgId) : null;
 
-    // Base filter: only active tasks
+    if (actorRole === "admin" && !actorOrgId) {
+      throw new HttpException(400, "Organization not selected in login");
+    }
+
+    const scopedOrgId = actorRole === "admin" ? actorOrgId : requestedOrgId;
+
     const whereClause = {
       isactive: true,
-      ...(userId
-        ? { userid: Number(userId) } // tasks assigned to that user
-        : {}),
+      ...(userId ? { userid: Number(userId) } : {}),
+      ...(scopedOrgId ? { orgid: scopedOrgId } : {}),
     };
 
-    // 1) Group tasks by statusId
     const grouped = await prisma.task.groupBy({
-      by: ['statusId'],
-      _count: {
-        _all: true,
-      },
+      by: ["statusId"],
+      _count: { _all: true },
       where: whereClause,
     });
 
     if (grouped.length === 0) {
       return res.json({
         data: [],
-        message: 'No tasks found for the given filter',
+        message: "No tasks found for the given filter",
       });
     }
 
     const statusIds = grouped.map((g) => g.statusId);
-
-    // 2) Get status records so we can attach status name
     const statuses = await prisma.status.findMany({
-      where: {
-        id: { in: statusIds },
-      },
+      where: { id: { in: statusIds } },
     });
 
-    // 3) Merge results
     const breakdown = grouped.map((g) => {
       const status = statuses.find((s) => s.id === g.statusId);
-
       return {
         statusId: g.statusId,
-        statusName: status?.name ?? null, // StatusName enum: created, assigned, ...
+        statusName: status?.name ?? null,
         count: g._count._all,
       };
     });
 
-    return res.json({
-      data: breakdown,
-    });
+    return res.json({ data: breakdown });
   } catch (error) {
-    console.error('Error in getStatusBreakdown:', error);
-    return res.status(500).json({
-      message: 'Failed to fetch status breakdown',
-      error: error.message,
+    console.error("Error in getStatusBreakdown:", error);
+    return res.status(error.statusCode || error.status || 500).json({
+      message: error.message || "Failed to fetch status breakdown",
     });
   }
 };
 
-
 export const getTaskDistributionByUser = async (req, res) => {
   try {
-    const { status } = req.query;
+    const { status, orgId } = req.query;
+    const actorRole = req.user?.role ?? null;
+    const actorOrgId = Number(req.user?.orgId || 0);
+    const requestedOrgId = orgId ? Number(orgId) : null;
 
-    // 1) Decide which statuses to include (for totalTasks)
+    if (actorRole === "admin" && !actorOrgId) {
+      throw new HttpException(400, "Organization not selected in login");
+    }
+
+    const scopedOrgId = actorRole === "admin" ? actorOrgId : requestedOrgId;
+
     let statusFilterNames;
     if (status) {
       const fromQuery = status
-        .split(',')
+        .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
-
       statusFilterNames = fromQuery.length > 0 ? fromQuery : ALLOWED_STATUSES;
     } else {
       statusFilterNames = ALLOWED_STATUSES;
     }
 
-    // 2) Get status rows for "total" calculation
     const statusRows = await prisma.status.findMany({
-      where: {
-        name: { in: statusFilterNames },
-      },
+      where: { name: { in: statusFilterNames } },
     });
-
     const statusIds = statusRows.map((s) => s.id);
 
     if (statusIds.length === 0) {
-      return res.json({
-        data: [],
-        message: 'No matching statuses found',
-      });
+      return res.json({ data: [], message: "No matching statuses found" });
     }
 
-    // 3) Fetch ALL users you want to show in chart
-    //    (here: all non-deleted users; change condition if needed)
     const users = await prisma.user.findMany({
       where: {
         isdeleted: false,
+        ...(scopedOrgId
+          ? {
+              organizationUserMap: {
+                some: { orgid: scopedOrgId, isactive: true },
+              },
+            }
+          : {}),
       },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-      },
+      select: { id: true, name: true, email: true },
+      orderBy: { name: "asc" },
     });
 
     if (users.length === 0) {
-      return res.json({
-        data: [],
-        message: 'No users found',
-      });
+      return res.json({ data: [], message: "No users found" });
     }
 
     const userIds = users.map((u) => u.id);
+    const taskScope = {
+      isactive: true,
+      userid: { in: userIds },
+      ...(scopedOrgId ? { orgid: scopedOrgId } : {}),
+    };
 
-    // 4) Group tasks by userid – TOTAL tasks (for the chosen statuses)
     const grouped = await prisma.task.groupBy({
-      by: ['userid'],
+      by: ["userid"],
       _count: { _all: true },
       where: {
-        isactive: true,
-        userid: { in: userIds },      // only these users
-        statusId: { in: statusIds },  // allowed statuses
+        ...taskScope,
+        statusId: { in: statusIds },
       },
     });
 
-    // 5) Get ACTIVE status IDs (assigned + in_progress)
     const activeStatusRows = await prisma.status.findMany({
-      where: {
-        name: { in: ACTIVE_STATUSES },
-      },
+      where: { name: { in: ACTIVE_STATUSES } },
     });
-
     const activeStatusIds = activeStatusRows.map((s) => s.id);
 
-    // 6) Group tasks by userid – ACTIVE tasks only
     const activeGrouped = await prisma.task.groupBy({
-      by: ['userid'],
+      by: ["userid"],
       _count: { _all: true },
       where: {
-        isactive: true,
-        userid: { in: userIds },
+        ...taskScope,
         statusId: { in: activeStatusIds },
       },
     });
 
-    // 7) Build final response over *all* users
     const distribution = users.map((user) => {
       const totalRow = grouped.find((g) => g.userid === user.id);
       const activeRow = activeGrouped.find((a) => a.userid === user.id);
-
       return {
         userId: user.id,
         userName: user.name,
@@ -434,14 +423,11 @@ export const getTaskDistributionByUser = async (req, res) => {
       };
     });
 
-    return res.json({
-      data: distribution,
-    });
+    return res.json({ data: distribution });
   } catch (error) {
-    console.error('Error in getTaskDistributionByUser:', error);
-    return res.status(500).json({
-      message: 'Failed to fetch task distribution by user',
-      error: error.message,
+    console.error("Error in getTaskDistributionByUser:", error);
+    return res.status(error.statusCode || error.status || 500).json({
+      message: error.message || "Failed to fetch task distribution by user",
     });
   }
 };

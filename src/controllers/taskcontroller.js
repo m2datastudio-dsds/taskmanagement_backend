@@ -1,7 +1,16 @@
 import { prisma } from "../config/prisma.js";
-import { StatusName } from "@prisma/client";
 import { HttpException } from "../utils/http-exception.js";
 
+const STATUS_NAMES = [
+  "created",
+  "assigned",
+  "in_progress",
+  "completed",
+  "closed",
+  "reassign",
+  "revoked",
+  "on_hold",
+];
 
 
 // Controller: create task (only admin)
@@ -443,7 +452,7 @@ export const changeTaskStatus = async (req, res, next) => {
       const input = (statusName ?? "").toString().trim();
       if (!input) throw new HttpException(400, "statusName or statusId is required");
 
-      const enumValues = Object.values(StatusName);
+      const enumValues = STATUS_NAMES;
       const matched = enumValues.find(v => v.toLowerCase() === input.toLowerCase());
       if (!matched) throw new HttpException(400, `Invalid status '${statusName}'. Valid: ${enumValues.join(", ")}`);
 
@@ -1480,6 +1489,8 @@ export const updateTaskImage = async (req, res, next) => {
     return next(new HttpException(500, "Internal Server Error"));
   }
 };
+
+
 
 
 

@@ -1,5 +1,5 @@
 // src/controllers/organization.controller.js
-import { PrismaClient, RoleName } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import { isSuperAdmin, isOrgAdmin } from '../utils/orgPermissions.js';
 
 const prisma = new PrismaClient();
@@ -122,7 +122,7 @@ export const createOrganization = async (req, res) => {
           data: {
             orgid: org.id,
             userid: adminId,
-            role: RoleName.admin,
+            role: "admin",
             assignedby: currentUserId
           }
         });
@@ -403,3 +403,4 @@ export const deleteOrganization = async (req, res) => {
     return res.status(500).json({ message: error.message ?? 'Internal Server Error' });
   }
 };
+

@@ -1,12 +1,12 @@
 // src/utils/orgPermissions.js
-import { PrismaClient, RoleName } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
 // Check if user has global super_admin role
 export async function isSuperAdmin(userId) {
   const superAdminRole = await prisma.role.findFirst({
-    where: { name: RoleName.super_admin },
+    where: { name: "super_admin" },
   });
 
   if (!superAdminRole) return false;
@@ -29,9 +29,10 @@ export async function isOrgAdmin(userId, orgId) {
       userid: userId,
       orgid: orgId,
       isactive: true,
-      role: RoleName.admin,
+      role: "admin",
     },
   });
 
   return !!mapping;
 }
+

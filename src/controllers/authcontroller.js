@@ -1,6 +1,5 @@
 import bcrypt from "bcryptjs";
 import { prisma } from "../config/prisma.js";
-import { RoleName } from "@prisma/client";
 import { HttpException } from "../utils/http-exception.js";
 import { generateToken } from "../utils/jwt.js";
 
@@ -197,6 +196,37 @@ export const login = async (req, res, next) => {
         throw new HttpException(403, "User is not assigned to any active organization");
       }
 
+      if (organizations.length === 1) {
+        const organization = organizations[0];
+        const finalRole = organization.role || roleName;
+        const token = generateToken({
+          userId: user.id,
+          role: finalRole,
+          orgId: organization.id,
+        });
+
+        return res.json({
+          success: true,
+          message: "Login successful",
+          token,
+          user: {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            role: finalRole,
+            createdat: user.createdat,
+            isdeleted: user.isdeleted,
+          },
+          organization: {
+            id: organization.id,
+            name: organization.name,
+            code: organization.code,
+            description: organization.description,
+            logo: organization.logo,
+          },
+        });
+      }
+
       return res.json({
         success: true,
         organizationRequired: true,
@@ -319,6 +349,8 @@ export const getAllAdmins = async (req, res, next) => {
     next(new HttpException(500, "Failed to fetch admin users"));
   }
 };
+
+
 
 
 

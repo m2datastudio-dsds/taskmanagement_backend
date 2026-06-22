@@ -1,6 +1,5 @@
 import { startOfWeek, endOfWeek } from "date-fns";
 import { prisma } from "../config/prisma.js";
-import { StatusName } from "@prisma/client";
 import { HttpException } from "../utils/http-exception.js";
 const ALLOWED_STATUSES = ['assigned', 'in_progress', 'completed', 'closed'];
 const ACTIVE_STATUSES = ['assigned', 'in_progress'];

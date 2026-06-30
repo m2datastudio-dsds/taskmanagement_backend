@@ -2,12 +2,14 @@ import express from "express";
 import cors from "cors";
 import routes from "./routes/index.js";
 import { errorHandler } from "./middlewares/errormiddleware.js";
-import {recurringTask} from "./cron/recurringTask.cron.js"
+import { recurringTask } from "./cron/recurringTask.cron.js";
 import path from "path";
 
-
-recurringTask();
 const app = express();
+
+if (process.env.ENABLE_RECURRING_TASK_CRON === "true") {
+  recurringTask();
+}
 
 app.use(cors());
 app.use(express.json());

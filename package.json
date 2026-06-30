@@ -11,7 +11,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:reset": "prisma migrate reset -f",
-    "prisma:seed": "node prisma/seed.js"
+    "prisma:seed": "node prisma/seed.js",
+    "user:update-superadmin-mobile": "node scripts/update-superadmin-mobile.js"
   },
   "dependencies": {
     "@prisma/client": "^6.17.1",

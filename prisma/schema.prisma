@@ -36,6 +36,7 @@ model User {
   id        Int      @id @default(autoincrement())
   name      String
   email     String   @unique
+  mobile    String?  @unique
   password  String
   isdeleted Boolean  @default(false)
   createdat DateTime @default(now())
@@ -72,6 +73,7 @@ model Task {
   userid         Int?
   periodSchedule String?
   orgid          Int?
+  bankid         Int?
   statusId       Int
   isactive       Boolean   @default(true)
   createdat      DateTime  @default(now())
@@ -92,11 +94,33 @@ model Task {
   comments       Comment[]        @relation("Task_Comments")
   taskcommentmap TaskCommentMap[] @relation("Task_TaskCommentMap")
   organization   Organization?    @relation("Org_Tasks", fields: [orgid], references: [id])
+  bank           Bank?            @relation("Bank_Tasks", fields: [bankid], references: [id])
+  subActivities  SubActivity[]     @relation("Task_SubActivities")
 
   @@index([userid])
   @@index([statusId])
   @@index([duedate])
   @@index([orgid])
+  @@index([bankid])
+}
+
+model SubActivity {
+  id        Int       @id @default(autoincrement())
+  taskid    Int
+  title     String
+  status    String    @default("pending")
+  remarks   String?
+  isactive  Boolean   @default(true)
+  createdby Int
+  createdat DateTime  @default(now())
+  updatedby Int?
+  updatedat DateTime  @updatedAt
+  removedat DateTime?
+
+  task Task @relation("Task_SubActivities", fields: [taskid], references: [id])
+
+  @@index([taskid, isactive])
+  @@index([status])
 }
 
 model TaskUserMap {
@@ -202,8 +226,31 @@ model Organization {
   createdByUser       User                  @relation("Organization_CreatedBy", fields: [createdby], references: [id])
   organizationUserMap OrganizationUserMap[]
   tasks               Task[]                @relation("Org_Tasks")
+  banks               Bank[]                @relation("Organization_Banks")
 
   @@index([isactive])
+}
+
+model Bank {
+  id            Int       @id @default(autoincrement())
+  orgid         Int
+  name          String
+  branchName    String
+  branchCode    String
+  address       String?
+  contactNumber String?
+  isactive      Boolean   @default(true)
+  createdby     Int
+  createdat     DateTime  @default(now())
+  updatedby     Int?
+  updatedat     DateTime  @updatedAt
+  removedat     DateTime?
+
+  organization Organization @relation("Organization_Banks", fields: [orgid], references: [id])
+  tasks        Task[]       @relation("Bank_Tasks")
+
+  @@unique([orgid, branchCode])
+  @@index([orgid, isactive])
 }
 
 model OrganizationUserMap {

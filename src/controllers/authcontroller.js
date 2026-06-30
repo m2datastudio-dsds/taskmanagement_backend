@@ -7,10 +7,11 @@ import { generateToken } from "../utils/jwt.js";
 // Register new user
 export const register = async (req, res, next) => {
   try {
-    const { name, email, password, roleName } = req.body;
+    const { name, email, mobile, password, roleName } = req.body;
 
     if (!name?.trim()) throw new HttpException(400, "Name is required");
     if (!email?.trim()) throw new HttpException(400, "Email is required");
+    if (!mobile?.trim()) throw new HttpException(400, "Mobile number is required");
     if (!password) throw new HttpException(400, "Password is required");
     if (!roleName?.trim()) throw new HttpException(400, "Role name is required");
 
@@ -38,9 +39,13 @@ export const register = async (req, res, next) => {
     }
 
     const cleanEmail = email.trim().toLowerCase();
+    const cleanMobile = mobile.trim();
 
     const existingUser = await prisma.user.findUnique({ where: { email: cleanEmail } });
     if (existingUser) throw new HttpException(400, "Email already registered");
+
+    const existingMobile = await prisma.user.findUnique({ where: { mobile: cleanMobile } });
+    if (existingMobile) throw new HttpException(400, "Mobile number already registered");
 
     const roleRow = await prisma.role.findFirst({
       where: { name: requestedRole }, // RoleName enum → must match exactly
@@ -51,7 +56,12 @@ export const register = async (req, res, next) => {
 
     const result = await prisma.$transaction(async (tx) => {
       const user = await tx.user.create({
-        data: { name: name.trim(), email: cleanEmail, password: hashedPassword },
+        data: {
+          name: name.trim(),
+          email: cleanEmail,
+          mobile: cleanMobile,
+          password: hashedPassword,
+        },
       });
 
       await tx.userRoleMap.create({
@@ -82,7 +92,13 @@ export const register = async (req, res, next) => {
     return res.status(201).json({
       success: true,
       message: "User registered successfully",
-      user: { id: result.id, name: result.name, email: result.email, role: roleRow.name },
+      user: {
+        id: result.id,
+        name: result.name,
+        email: result.email,
+        mobile: result.mobile,
+        role: roleRow.name,
+      },
     });
   } catch (err) {
     if (err instanceof HttpException) return next(err);
@@ -96,14 +112,15 @@ export const register = async (req, res, next) => {
 
 export const login = async (req, res, next) => {
   try {
-    const { email, password, organizationName } = req.body;
+    const { mobile, mobileNumber, password, organizationName } = req.body;
+    const loginMobile = String(mobileNumber ?? mobile ?? "").trim();
 
-    if (!email?.trim()) throw new HttpException(400, "Email is required");
+    if (!loginMobile) throw new HttpException(400, "Mobile number is required");
     if (!password) throw new HttpException(400, "Password is required");
 
     // 1️⃣ Find user
     const user = await prisma.user.findUnique({
-      where: { email },
+      where: { mobile: loginMobile },
       include: {
         userrolemap: {
           where: { isactive: true },
@@ -112,14 +129,14 @@ export const login = async (req, res, next) => {
       }
     });
 
-    if (!user) throw new HttpException(400, "Invalid email or password");
+    if (!user) throw new HttpException(400, "Invalid mobile number or password");
 
     // Determine role
     const roleName = user.userrolemap?.[0]?.role?.name || null;
 
     // 2️⃣ Validate password
     const validPassword = await bcrypt.compare(password, user.password);
-    if (!validPassword) throw new HttpException(400, "Invalid email or password");
+    if (!validPassword) throw new HttpException(400, "Invalid mobile number or password");
 
     // Helper: convert stored logo path into full URL
     const toFullLogoUrl = (logoValue) => {
@@ -151,6 +168,7 @@ export const login = async (req, res, next) => {
           id: user.id,
           name: user.name,
           email: user.email,
+          mobile: user.mobile,
           role: roleName,
           createdat: user.createdat,
           isdeleted: user.isdeleted,
@@ -213,6 +231,7 @@ export const login = async (req, res, next) => {
             id: user.id,
             name: user.name,
             email: user.email,
+            mobile: user.mobile,
             role: finalRole,
             createdat: user.createdat,
             isdeleted: user.isdeleted,
@@ -236,6 +255,7 @@ export const login = async (req, res, next) => {
           id: user.id,
           name: user.name,
           email: user.email,
+          mobile: user.mobile,
           role: roleName,
           createdat: user.createdat,
           isdeleted: user.isdeleted,
@@ -297,6 +317,7 @@ export const login = async (req, res, next) => {
         id: user.id,
         name: user.name,
         email: user.email,
+        mobile: user.mobile,
         role: finalRole,
         createdat: user.createdat,
         isdeleted: user.isdeleted,
@@ -334,7 +355,8 @@ export const getAllAdmins = async (req, res, next) => {
       select: {
         id: true,
         name: true,
-        email: true
+        email: true,
+        mobile: true
       }
     });
 
@@ -349,6 +371,86 @@ export const getAllAdmins = async (req, res, next) => {
     next(new HttpException(500, "Failed to fetch admin users"));
   }
 };
+
+export const updateUserMobile = async (req, res, next) => {
+  try {
+    const actorId = Number(req.user?.userId);
+    const actorRole = req.user?.role;
+    const actorOrgId = Number(req.user?.orgId || 0);
+    const targetUserId = Number(req.params.userId);
+    const mobile = String(req.body.mobileNumber ?? req.body.mobile ?? "").trim();
+
+    if (!actorId) throw new HttpException(401, "Unauthorized");
+    if (!targetUserId) throw new HttpException(400, "User id is required");
+    if (!mobile) throw new HttpException(400, "Mobile number is required");
+    if (!/^\+?[0-9]{7,15}$/.test(mobile)) {
+      throw new HttpException(400, "Enter a valid mobile number");
+    }
+
+    const targetUser = await prisma.user.findUnique({
+      where: { id: targetUserId },
+      include: {
+        userrolemap: {
+          where: { isactive: true },
+          include: { role: true },
+        },
+        organizationUserMap: {
+          where: { isactive: true },
+        },
+      },
+    });
+
+    if (!targetUser) throw new HttpException(404, "User not found");
+    if (targetUser.isdeleted) throw new HttpException(400, "User is deactivated");
+
+    const targetRole = targetUser.userrolemap?.[0]?.role?.name || null;
+    let allowed = false;
+
+    if (actorRole === "super_admin") {
+      allowed = targetUserId === actorId || targetRole === "admin";
+    } else if (actorRole === "admin") {
+      allowed =
+        ["employee", "intern"].includes(targetRole) &&
+        !!actorOrgId &&
+        targetUser.organizationUserMap.some((map) => map.orgid === actorOrgId);
+    }
+
+    if (!allowed) {
+      throw new HttpException(403, "You are not allowed to update this mobile number");
+    }
+
+    const existingMobile = await prisma.user.findUnique({ where: { mobile } });
+    if (existingMobile && existingMobile.id !== targetUserId) {
+      throw new HttpException(400, "Mobile number already registered");
+    }
+
+    const updatedUser = await prisma.user.update({
+      where: { id: targetUserId },
+      data: { mobile },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        mobile: true,
+        isdeleted: true,
+        createdat: true,
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: "Mobile number updated successfully",
+      user: {
+        ...updatedUser,
+        role: targetRole,
+      },
+    });
+  } catch (err) {
+    if (err instanceof HttpException) return next(err);
+    return next(new HttpException(500, "Internal Server Error"));
+  }
+};
+
 
 
 

@@ -174,44 +174,54 @@ export const createTask = async (req, res, next) => {
       description,
       assignedToId,
       assignedToName,
-      statusName,
       dueDate,
       priority,
-
-      // 🔁 Recurring schedule
-      period,        // daily | weekly | monthly | yearly
-      timeOfDay,     // HH:mm
-    dayOfWeek,
-      monthDay,
-      yearSelect,
-      yearMonth,
-      yearDay,
-
-      endDate,
-      neverEnd,
+      bankId,
+      subActivities,
     } = req.body;
+
+    if (subActivities != null && !Array.isArray(subActivities)) {
+      throw new HttpException(400, "subActivities must be a list");
+    }
+    const normalizedSubActivities = [...new Set(
+      (subActivities || [])
+        .map((item) =>
+          typeof item === "string" ? item.trim() : String(item?.title || "").trim()
+        )
+        .filter(Boolean)
+    )];
+    if (normalizedSubActivities.length > 100) {
+      throw new HttpException(400, "A task can have a maximum of 100 sub-activities");
+    }
+
+    const parsedBankId = Number(bankId);
+    if (!Number.isInteger(parsedBankId) || parsedBankId <= 0) {
+      throw new HttpException(400, "Please select a bank");
+    }
+    const bank = await prisma.bank.findFirst({
+      where: { id: parsedBankId, orgid: Number(orgId), isactive: true },
+      select: { id: true },
+    });
+    if (!bank) {
+      throw new HttpException(400, "Selected bank is not active in this organization");
+    }
 
     /* ------------------------------
        BASIC VALIDATION
     ------------------------------ */
-    if (!title || !statusName) {
-      throw new HttpException(400, "Title and status are required");
+    if (!String(title || "").trim()) {
+      throw new HttpException(400, "Title is required");
     }
 
     /* ------------------------------
        STATUS VALIDATION
     ------------------------------ */
     const status = await prisma.status.findFirst({
-      where: { name: statusName.toLowerCase() },
+      where: { name: "assigned" },
     });
 
     if (!status) {
-      throw new HttpException(400, "Invalid status");
-    }
-
-
-    if (statusName.toLowerCase() !== "assigned") {
-      throw new HttpException(400, "Task must be assigned to an employee or intern");
+      throw new HttpException(400, "Status 'assigned' not found");
     }
     /* ------------------------------
        ASSIGNED USER RESOLVE
@@ -280,50 +290,6 @@ export const createTask = async (req, res, next) => {
     }
 
 
-      // 🔐 VALIDATION: schedule fields per period
-    if (period === "weekly" && (dayOfWeek === undefined || dayOfWeek === null)) {
-      throw new HttpException(400, "dayOfWeek is required for weekly tasks");
-    }
-    if (period === "monthly" && (monthDay === undefined || monthDay === null || monthDay === "")) {
-      throw new HttpException(400, "monthDay (1-31) is required for monthly tasks");
-    }
-    if (period === "yearly") {
-      if (yearMonth === undefined || yearMonth === null || yearMonth === "") {
-        throw new HttpException(400, "yearMonth (0-11) is required for yearly tasks");
-      }
-      if (yearDay === undefined || yearDay === null || yearDay === "") {
-        throw new HttpException(400, "yearDay (1-31) is required for yearly tasks");
-      }
-    }
-
-    /* ------------------------------
-       PERIOD SCHEDULE (NO startDate)
-    ------------------------------ */
-    let periodSchedule = null;
-
-    if (period) {
-      if (!timeOfDay) {
-        throw new HttpException(
-          400,
-          "timeOfDay is required for recurring tasks"
-        );
-      }
-
-      
-
-      periodSchedule = JSON.stringify({
-        period,
-        timeOfDay,
-    dayOfWeek: period === "weekly" ? Number(dayOfWeek) : null,
-        monthDay,
-        yearSelect,
-        yearMonth,
-        yearDay,
-        endDate: neverEnd ? null : endDate,
-        neverEnd: !!neverEnd,
-      });
-    }
-
     let parsedDueDate = null;
     if (dueDate !== undefined && dueDate !== null && String(dueDate).trim() !== "") {
       parsedDueDate = new Date(dueDate);
@@ -332,10 +298,10 @@ export const createTask = async (req, res, next) => {
       }
     }
 
-    const allowedPriorities = new Set(["low", "medium", "high", "urgent", "normal"]);
+    const allowedPriorities = new Set(["normal", "urgent"]);
     const normalizedPriority = String(priority || "normal").trim().toLowerCase();
     if (!allowedPriorities.has(normalizedPriority)) {
-      throw new HttpException(400, "Invalid priority. Use low/medium/high/urgent");
+      throw new HttpException(400, "Invalid priority. Use normal/urgent");
     }
     const taskOwnerUserId = assignedUserId;
     const uploadedImageUrl = taskImageUrl(req);
@@ -343,35 +309,46 @@ export const createTask = async (req, res, next) => {
     /* ------------------------------
        CREATE TASK
     ------------------------------ */
-    const task = await prisma.task.create({
-      data: {
-        title,
-        description,
-        userid: taskOwnerUserId,
-        statusId: status.id,
-        createdby: actorId,
-        orgid: orgId,
-        isactive: true,
-        periodSchedule,
-        duedate: parsedDueDate,
-        priority: normalizedPriority,
-        ...(uploadedImageUrl ? { imageUrl: uploadedImageUrl } : {}),
-      },
-    });
+    const task = await prisma.$transaction(async (tx) => {
+      const createdTask = await tx.task.create({
+        data: {
+          title: String(title).trim(),
+          description,
+          userid: taskOwnerUserId,
+          statusId: status.id,
+          createdby: actorId,
+          orgid: orgId,
+          bankid: bank.id,
+          isactive: true,
+          periodSchedule: null,
+          duedate: parsedDueDate,
+          priority: normalizedPriority,
+          ...(uploadedImageUrl ? { imageUrl: uploadedImageUrl } : {}),
+        },
+      });
 
-    /* ------------------------------
-       MAP USER TO TASK
-       Assigned task -> employee/intern userid
-       Task owner -> assigned employee/intern userid
-    ------------------------------ */
-    await prisma.taskUserMap.create({
-      data: {
-        taskid: task.id,
-        userid: taskOwnerUserId,
-        statusId: status.id,
-        createdby: actorId,
-        isactive: true,
-      },
+      await tx.taskUserMap.create({
+        data: {
+          taskid: createdTask.id,
+          userid: taskOwnerUserId,
+          statusId: status.id,
+          createdby: actorId,
+          isactive: true,
+        },
+      });
+
+      if (normalizedSubActivities.length > 0) {
+        await tx.subActivity.createMany({
+          data: normalizedSubActivities.map((activityTitle) => ({
+            taskid: createdTask.id,
+            title: activityTitle,
+            status: "pending",
+            createdby: actorId,
+          })),
+        });
+      }
+
+      return createdTask;
     });
 
     return res.status(201).json({
@@ -411,7 +388,7 @@ export const changeTaskStatus = async (req, res, next) => {
     // 1) Find task
     const task = await prisma.task.findUnique({
       where: { id: parsedTaskId },
-      include: { assignedUser: true },
+      include: { assignedUser: true, status: true },
     });
     if (!task) throw new HttpException(404, "Task not found");
 
@@ -474,6 +451,24 @@ export const changeTaskStatus = async (req, res, next) => {
     // 5) Transaction: update Task, set-once timestamps, ALWAYS mirror statusId on all active maps
     const now = new Date();
     const statusLower = statusNameResolved.toLowerCase();
+    const currentStatusLower = String(task.status?.name || "").toLowerCase();
+
+    if (!isAdminLike) {
+      if (statusLower === "completed" && currentStatusLower !== "in_progress") {
+        throw new HttpException(400, "Start work before marking task completed");
+      }
+
+      if (statusLower === "on_hold" && currentStatusLower !== "in_progress") {
+        throw new HttpException(400, "Task can be put on hold only after start work");
+      }
+
+      if (
+        statusLower === "in_progress" &&
+        !["assigned", "on_hold"].includes(currentStatusLower)
+      ) {
+        throw new HttpException(400, "Task can start only from assigned or on hold");
+      }
+    }
 
     const result = await prisma.$transaction(async (tx) => {
       // a) Update Task
@@ -784,6 +779,7 @@ export const getAllTasks = async (req, res, next) => {
     const skip = (page - 1) * limit;
     const search = req.query.search || "";
     const statusId = req.query.statusId ? parseInt(req.query.statusId) : null;
+    const bankId = req.query.bankId ? parseInt(req.query.bankId, 10) : null;
     const isActive =
       req.query.isactive !== undefined ? req.query.isactive === "true" : true;
 
@@ -795,6 +791,7 @@ export const getAllTasks = async (req, res, next) => {
         { description: { contains: search, mode: "insensitive" } },
       ],
       ...(statusId ? { statusId } : {}),
+      ...(bankId ? { bankid: bankId } : {}),
       ...(actorRole === "admin" ? { orgid: actorOrgId } : {}),
     };
 
@@ -812,6 +809,16 @@ export const getAllTasks = async (req, res, next) => {
           assignedUser: { select: { id: true, name: true, email: true } }, // ✅ assigned user
           createdByUser: { select: { id: true, name: true, email: true } }, // ✅ creator
           organization: { select: { id: true, name: true, code: true } },
+          bank: {
+            select: {
+              id: true,
+              name: true,
+              branchName: true,
+              branchCode: true,
+              address: true,
+              contactNumber: true,
+            },
+          },
           taskusermap: true, // optional if you need mapping info
           
         },
@@ -913,6 +920,7 @@ export const getAllUsers = async (req, res, next) => {
       id: u.id,
       name: u.name,
       email: u.email,
+      mobile: u.mobile,
       createdat: u.createdat,
       isdeleted: u.isdeleted,
       role: u.userrolemap?.[0]?.role?.name || null,
@@ -956,6 +964,7 @@ export const getTasksByUserId = async (req, res, next) => {
     const skip = (page - 1) * limit;
 
     const statusId = req.query.statusId ? parseInt(req.query.statusId, 10) : null;
+    const bankId = req.query.bankId ? parseInt(req.query.bankId, 10) : null;
     const isActive =
       req.query.isactive !== undefined ? req.query.isactive === "true" : true;
 
@@ -964,6 +973,7 @@ export const getTasksByUserId = async (req, res, next) => {
       userid: userId, // now integer
       isactive: isActive,
       ...(statusId ? { statusId } : {}),
+      ...(bankId ? { bankid: bankId } : {}),
     };
 
     // Fetch tasks + total count
@@ -977,6 +987,16 @@ export const getTasksByUserId = async (req, res, next) => {
           status: { select: { id: true, name: true } },
           assignedUser: { select: { id: true, name: true, email: true } },
           createdByUser: { select: { id: true, name: true, email: true } },
+          bank: {
+            select: {
+              id: true,
+              name: true,
+              branchName: true,
+              branchCode: true,
+              address: true,
+              contactNumber: true,
+            },
+          },
           taskusermap: true,
         },
       }),
@@ -1489,6 +1509,7 @@ export const updateTaskImage = async (req, res, next) => {
     return next(new HttpException(500, "Internal Server Error"));
   }
 };
+
 
 
 
